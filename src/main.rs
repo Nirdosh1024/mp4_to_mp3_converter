@@ -8,14 +8,12 @@ fn parse_mp4(file_path: &str) -> io::Result<()> {
     let file_size = file.metadata()?.len();
 
     let mut buffer = [0u8; 8]; // Atom header is 8 bytes (size + type)
-
-    println!("MP4 Atom Structure:");
-    println!("{:<10} {:<10} {:<10}", "Offset", "Type", "Size");
-
     let mut offset = 0;
 
+    let mut audio_found = false;
+
+    // Parse the MP4 file
     while offset < file_size {
-        // Check if we have enough remaining bytes to read the header
         if file_size - offset < 8 {
             println!("Incomplete atom header at offset {}", offset);
             break;
@@ -24,25 +22,128 @@ fn parse_mp4(file_path: &str) -> io::Result<()> {
         // Read the next 8 bytes (atom header)
         file.read_exact(&mut buffer)?;
 
-        // Parse the size (first 4 bytes)
-        let size = u32::from_be_bytes(buffer[0..4].try_into().unwrap());
+        // First read the size
+        let size = {
+            let size_bytes: [u8; 4] = buffer[0..4].try_into().unwrap();
+            u32::from_be_bytes(size_bytes)
+        };
 
-        // Parse the type (next 4 bytes)
-        let atom_type = std::str::from_utf8(&buffer[4..8]).unwrap_or("Invalid");
+        // Then read the atom type
+        let atom_type = {
+            let type_bytes = &buffer[4..8];
+            std::str::from_utf8(type_bytes).unwrap_or("Invalid")
+        };
 
-        println!("{:<10} {:<10} {:<10}", offset, atom_type, size);
+        // Check if this is the moov atom (contains track info)
+        if atom_type == "moov" {
+            println!("Found 'moov' atom at offset {}", offset);
 
-        // If the atom size is invalid, stop processing
-        if size < 8 {
-            println!("Invalid atom size {} at offset {}", size, offset);
-            break;
+            offset += 8;
+            file.seek(SeekFrom::Start(offset))?;
+
+            while offset < file_size {
+                if file_size - offset < 8 {
+                    break;
+                }
+
+                file.read_exact(&mut buffer)?;
+
+                let size = {
+                    let size_bytes: [u8; 4] = buffer[0..4].try_into().unwrap();
+                    u32::from_be_bytes(size_bytes)
+                };
+
+                let atom_type = {
+                    let type_bytes = &buffer[4..8];
+                    std::str::from_utf8(type_bytes).unwrap_or("Invalid")
+                };
+
+                // Look for 'trak' atoms (tracks)
+                if atom_type == "trak" {
+                    println!("Found 'trak' atom at offset {}", offset);
+
+                    offset += 8;
+                    file.seek(SeekFrom::Start(offset))?;
+
+                    while offset < file_size {
+                        if file_size - offset < 8 {
+                            break;
+                        }
+
+                        file.read_exact(&mut buffer)?;
+
+                        let size = {
+                            let size_bytes: [u8; 4] = buffer[0..4].try_into().unwrap();
+                            u32::from_be_bytes(size_bytes)
+                        };
+
+                        let atom_type = {
+                            let type_bytes = &buffer[4..8];
+                            std::str::from_utf8(type_bytes).unwrap_or("Invalid")
+                        };
+
+                        if atom_type == "mdia" {
+                            println!("Found 'mdia' atom at offset {}", offset);
+
+                            offset += 8;
+                            file.seek(SeekFrom::Start(offset))?;
+
+                            while offset < file_size {
+                                if file_size - offset < 8 {
+                                    break;
+                                }
+
+                                file.read_exact(&mut buffer)?;
+
+                                let size = {
+                                    let size_bytes: [u8; 4] = buffer[0..4].try_into().unwrap();
+                                    u32::from_be_bytes(size_bytes)
+                                };
+
+                                let atom_type = {
+                                    let type_bytes = &buffer[4..8];
+                                    std::str::from_utf8(type_bytes).unwrap_or("Invalid")
+                                };
+
+                                if atom_type == "hdlr" {
+                                    println!("Found 'hdlr' atom at offset {}", offset);
+
+                                    let mut handler_type = [0u8; 4];
+                                    file.read_exact(&mut handler_type)?;
+
+                                    let handler_str = std::str::from_utf8(&handler_type).unwrap();
+
+                                    if handler_str == "soun" {
+                                        println!("Audio track found at offset {}", offset);
+                                        audio_found = true;
+                                    }
+
+                                    break;
+                                }
+
+                                offset += size as u64;
+                                file.seek(SeekFrom::Start(offset))?;
+                            }
+                        }
+
+                        offset += size as u64;
+                        file.seek(SeekFrom::Start(offset))?;
+                    }
+                }
+
+                offset += size as u64;
+                file.seek(SeekFrom::Start(offset))?;
+            }
         }
 
-        // Move the offset forward by the atom size
         offset += size as u64;
-
-        // Seek to the next atom's position
         file.seek(SeekFrom::Start(offset))?;
+    }
+
+    if audio_found {
+        println!("Audio track identified successfully!");
+    } else {
+        println!("No audio track found in the MP4 file.");
     }
 
     Ok(())
