@@ -1,157 +1,93 @@
-use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::fs::{write, File};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::process::Command;
 
-fn parse_mp4(file_path: &str) -> io::Result<()> {
+#[derive(Debug)]
+struct Mp4Atom {
+    offset: u64,
+    size: u32,
+    atom_type: String,
+}
+
+// Parses an Mp4 file and extracts atoms
+fn parse_mp4(file_path: &str) -> io::Result<Vec<Mp4Atom>> {
     let mut file = File::open(file_path)?;
-
-    // Get the total file size
     let file_size = file.metadata()?.len();
 
+    let mut atoms = Vec::new();
     let mut buffer = [0u8; 8]; // Atom header is 8 bytes (size + type)
     let mut offset = 0;
 
-    let mut audio_found = false;
-
-    // Parse the MP4 file
     while offset < file_size {
         if file_size - offset < 8 {
-            println!("Incomplete atom header at offset {}", offset);
             break;
         }
 
-        // Read the next 8 bytes (atom header)
+        file.seek(SeekFrom::Start(offset))?;
         file.read_exact(&mut buffer)?;
 
-        // First read the size
-        let size = {
-            let size_bytes: [u8; 4] = buffer[0..4].try_into().unwrap();
-            u32::from_be_bytes(size_bytes)
-        };
+        let size = u32::from_be_bytes(buffer[0..4].try_into().unwrap());
+        let atom_type = std::str::from_utf8(&buffer[4..8])
+            .unwrap_or("Invalid")
+            .to_string();
 
-        // Then read the atom type
-        let atom_type = {
-            let type_bytes = &buffer[4..8];
-            std::str::from_utf8(type_bytes).unwrap_or("Invalid")
-        };
+        atoms.push(Mp4Atom {
+            offset,
+            size,
+            atom_type,
+        });
 
-        // Check if this is the moov atom (contains track info)
-        if atom_type == "moov" {
-            println!("Found 'moov' atom at offset {}", offset);
+        offset += if size > 8 { size as u64 } else { 8 }; // Prevent infinite loop on bad data
+    }
 
-            offset += 8;
-            file.seek(SeekFrom::Start(offset))?;
+    Ok(atoms)
+}
 
-            while offset < file_size {
-                if file_size - offset < 8 {
-                    break;
-                }
+// Extracts the audio data from 'mdat' atom (Placeholder)
+fn extract_audio_data(file_path: &str, atoms: &[Mp4Atom]) -> io::Result<Vec<u8>> {
+    let mut file = File::open(file_path)?;
+    let mut audio_data = Vec::new();
 
-                file.read_exact(&mut buffer)?;
-
-                let size = {
-                    let size_bytes: [u8; 4] = buffer[0..4].try_into().unwrap();
-                    u32::from_be_bytes(size_bytes)
-                };
-
-                let atom_type = {
-                    let type_bytes = &buffer[4..8];
-                    std::str::from_utf8(type_bytes).unwrap_or("Invalid")
-                };
-
-                // Look for 'trak' atoms (tracks)
-                if atom_type == "trak" {
-                    println!("Found 'trak' atom at offset {}", offset);
-
-                    offset += 8;
-                    file.seek(SeekFrom::Start(offset))?;
-
-                    while offset < file_size {
-                        if file_size - offset < 8 {
-                            break;
-                        }
-
-                        file.read_exact(&mut buffer)?;
-
-                        let size = {
-                            let size_bytes: [u8; 4] = buffer[0..4].try_into().unwrap();
-                            u32::from_be_bytes(size_bytes)
-                        };
-
-                        let atom_type = {
-                            let type_bytes = &buffer[4..8];
-                            std::str::from_utf8(type_bytes).unwrap_or("Invalid")
-                        };
-
-                        if atom_type == "mdia" {
-                            println!("Found 'mdia' atom at offset {}", offset);
-
-                            offset += 8;
-                            file.seek(SeekFrom::Start(offset))?;
-
-                            while offset < file_size {
-                                if file_size - offset < 8 {
-                                    break;
-                                }
-
-                                file.read_exact(&mut buffer)?;
-
-                                let size = {
-                                    let size_bytes: [u8; 4] = buffer[0..4].try_into().unwrap();
-                                    u32::from_be_bytes(size_bytes)
-                                };
-
-                                let atom_type = {
-                                    let type_bytes = &buffer[4..8];
-                                    std::str::from_utf8(type_bytes).unwrap_or("Invalid")
-                                };
-
-                                if atom_type == "hdlr" {
-                                    println!("Found 'hdlr' atom at offset {}", offset);
-
-                                    let mut handler_type = [0u8; 4];
-                                    file.read_exact(&mut handler_type)?;
-
-                                    let handler_str = std::str::from_utf8(&handler_type).unwrap();
-
-                                    if handler_str == "soun" {
-                                        println!("Audio track found at offset {}", offset);
-                                        audio_found = true;
-                                    }
-
-                                    break;
-                                }
-
-                                offset += size as u64;
-                                file.seek(SeekFrom::Start(offset))?;
-                            }
-                        }
-
-                        offset += size as u64;
-                        file.seek(SeekFrom::Start(offset))?;
-                    }
-                }
-
-                offset += size as u64;
-                file.seek(SeekFrom::Start(offset))?;
-            }
+    for atom in atoms {
+        if atom.atom_type == "mdat" {
+            file.seek(SeekFrom::Start(atom.offset + 8))?;
+            let mut buffer = vec![0u8; (atom.size - 8) as usize];
+            file.read_exact(&mut buffer)?;
+            audio_data.extend(buffer);
         }
-
-        offset += size as u64;
-        file.seek(SeekFrom::Start(offset))?;
     }
 
-    if audio_found {
-        println!("Audio track identified successfully!");
-    } else {
-        println!("No audio track found in the MP4 file.");
-    }
+    Ok(audio_data)
+}
 
-    Ok(())
+// Converts AAC to MP3 using FFmpeg
+fn convert_aac_to_mp3(aac_data: Vec<u8>) -> Vec<u8> {
+    let temp_aac = "audio.aac";
+    let temp_mp3 = "output.mp3";
+
+    let mut file = std::fs::File::create(temp_aac).expect("Failed to create AAC file");
+    file.write_all(&aac_data).expect("Failed to write aac file");
+
+    let _output = Command::new("ffmpeg")
+        .args(["-i", temp_aac, "-q:a", "2", "-y", temp_mp3])
+        .output()
+        .expect("Failed to execute ffmpeg");
+
+    std::fs::read(temp_mp3).expect("Failed to read MP3 file")
 }
 
 fn main() {
-    let file_path = "video.mp4"; // Replace with your MP4 file path
-    if let Err(e) = parse_mp4(file_path) {
-        eprintln!("Error parsing MP4: {}", e);
+    let file_path = "video.mp4";
+    if let Ok(atoms) = parse_mp4(file_path) {
+        if let Ok(aac_data) = extract_audio_data(file_path, &atoms) {
+            let mp3_data = convert_aac_to_mp3(aac_data);
+
+            write("output.mp3", &mp3_data).expect("Failed to write Mp3 file");
+            println!("MP3 conversion complete!");
+        } else {
+            println!("No audio track found.");
+        }
+    } else {
+        println!("Failed to parse MP4 file.");
     }
 }
